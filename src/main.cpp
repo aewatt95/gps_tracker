@@ -3,20 +3,25 @@
 #include <Adafruit_FONA.h>
 #include <LowPower.h>
 
+
+
 //Defines for the SIM800L module
-#define FONA_RX 2
-#define FONA_TX 3
-#define FONA_RST 4
+#define FONA_RX 15
+#define FONA_TX 14
+#define FONA_RST 16
 
 //Defines for the BN-220 module
-#define RXPin 14
-#define TXPin 15
+#define RXPin 2
+#define TXPin 3
 #define GPSBaud 9600
 
-#define GPSTIMEOUT 30000
+#define GPSTIMEOUT 120000
 
-#define GSMPOWERPIN 5
-#define GPSPOWERPIN 6
+#define GSMPOWERPIN 6
+#define GPSPOWERPIN 10
+
+#define RETRYS 10
+
 String rootUrl = "https://servae.hopto.org:1881/bikefinder";
 
 TinyGPSPlus gps;
@@ -31,13 +36,13 @@ long readVcc() {
   // Read 1.1V reference against AVcc
   // set the reference to Vcc and the measurement to the internal 1.1V reference
   #if defined(__AVR_ATmega32U4__) || defined(__AVR_ATmega1280__) || defined(__AVR_ATmega2560__)
-    ADMUX = _BV(REFS0) | _BV(MUX4) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
+  ADMUX = _BV(REFS0) | _BV(MUX4) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
   #elif defined (__AVR_ATtiny24__) || defined(__AVR_ATtiny44__) || defined(__AVR_ATtiny84__)
-    ADMUX = _BV(MUX5) | _BV(MUX0);
+  ADMUX = _BV(MUX5) | _BV(MUX0);
   #elif defined (__AVR_ATtiny25__) || defined(__AVR_ATtiny45__) || defined(__AVR_ATtiny85__)
-    ADMUX = _BV(MUX3) | _BV(MUX2);
+  ADMUX = _BV(MUX3) | _BV(MUX2);
   #else
-    ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
+  ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
   #endif
 
   delay(2); // Wait for Vref to settle
@@ -89,18 +94,18 @@ void refreshGPSData(){
 
 void reset(){
   fona.enableGPRS(false);
-
 }
 
 
 void initGPRS(){
-  while(fona.getNetworkStatus() != 1){
+  byte retrysCounter = 0;
+  while(fona.getNetworkStatus() != 1 && ++retrysCounter < RETRYS){
     Serial.println("Connecting to Network");
     delay(1000);
   }
   Serial.println("Connected to Network");
-  delay(1000);
-  while (!fona.enableGPRS(true)){
+  retrysCounter = 0;
+  while (!fona.enableGPRS(true) && ++retrysCounter < RETRYS){
     Serial.println(F("Failed to turn on GPRS. Try again..."));
     delay(1000);
   }
@@ -109,7 +114,7 @@ void initGPRS(){
 
 
 String performGetRequest(byte topic){
-  fonaSoftSerial.begin(4800);
+  fonaSoftSerial.begin(2400);
 
   uint16_t statuscode;
   int16_t length;
@@ -120,35 +125,36 @@ String performGetRequest(byte topic){
   if (! fona.begin(fonaSoftSerial)) {
     Serial.println(F("Couldn't find FONA"));
   }
-
-  if (!fona.GPRSstate()) initGPRS();
-
-  switch (topic) {
-    case LOCATION: {
-      combinedUrl += "?setLat=" + String(gps.location.lat(), 6) + "&setLon=" + String(gps.location.lng(), 6);
-      break;
+  else{
+    if (!fona.GPRSstate()) initGPRS();
+    switch (topic) {
+      case LOCATION: {
+        combinedUrl += "?setLat=" + String(gps.location.lat(), 6) + "&setLon=" + String(gps.location.lng(), 6);
+        break;
+      }
+      case CHECKSTATUS:{
+        combinedUrl += "?getCheckStatus" + String("&setBatteryStatus=") + String(readVcc());
+      }
     }
-    case CHECKSTATUS:{
-      combinedUrl += "?getCheckStatus" + String("&setBatteryStatus=") + String(readVcc());
+    Serial.println(combinedUrl);
+
+    //Main part sending data
+    if (!fona.HTTP_GET_start(combinedUrl.c_str(), &statuscode, (uint16_t *)&length)) Serial.println("Failed!");
+    else{
+      while (length > 0 ) {
+        while (fona.available()) {
+          char c = fona.read();
+          Serial.write(c);
+          response += c;
+          length--;
+          if (! length) break;
+        }
+      }
     }
+    Serial.println(F("\n****"));
+    //fona.HTTP_GET_end();
+    Serial.println(response);
   }
-  Serial.println(combinedUrl);
-
-  //Main part sending data
-  if (!fona.HTTP_GET_start(combinedUrl.c_str(), &statuscode, (uint16_t *)&length)) Serial.println("Failed!");
-  while (length > 0) {
-            while (fona.available()) {
-              char c = fona.read();
-              Serial.write(c);
-              response += c;
-              length--;
-              if (! length) break;
-            }
-          }
-          Serial.println(F("\n****"));
-          fona.HTTP_GET_end();
-  Serial.println(response);
-  reset();
   fonaSoftSerial.end();
   return response;
 }
@@ -160,12 +166,13 @@ void setup()
   pinMode(GPSPOWERPIN, OUTPUT);
   digitalWrite(GSMPOWERPIN, LOW);
   digitalWrite(GPSPOWERPIN, LOW);
-  delay(5000);
+  delay(1000);
 }
 
 void loop()
 {
   Serial.begin(9600);
+  Serial.println("loop begin");
   digitalWrite(GSMPOWERPIN, HIGH);
   String response = performGetRequest(CHECKSTATUS);
   if(response == "true"){
@@ -175,6 +182,7 @@ void loop()
   if(response == "battery"){
     performGetRequest(BATTERY);
   }
+  //reset();
 
   //Prepare Deep Sleep;
   Serial.end();
@@ -193,5 +201,5 @@ void loop()
   */
   for(int i=0; i<8; i++)
   LowPower.idle(SLEEP_8S, ADC_OFF, TIMER2_OFF, TIMER1_OFF, TIMER0_OFF,
-               SPI_OFF, USART0_OFF, TWI_OFF);
-}
+    SPI_OFF, USART0_OFF, TWI_OFF);
+  }
